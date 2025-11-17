@@ -1,3 +1,5 @@
+import { tryLLMRefactor, tryLLMExplain } from './llmClient.js';
+
 export type RefactorStyle = 'conservative' | 'balanced' | 'aggressive';
 
 export interface RefactorInput {
@@ -12,15 +14,42 @@ export interface RefactorOutput {
   explanation: string;
 }
 
-export function performRefactor({ code, languageId, style, includeDocumentation }: RefactorInput): RefactorOutput {
+export interface ExplanationOutput {
+  explanation: string;
+}
+
+export async function performRefactor(input: RefactorInput): Promise<RefactorOutput> {
+  const llmResult = await tryLLMRefactor(input);
+  if (llmResult) {
+    return llmResult;
+  }
+
+  return performHeuristicRefactor(input);
+}
+
+export async function performExplain(input: RefactorInput): Promise<ExplanationOutput> {
+  const llmResult = await tryLLMExplain(input);
+  if (llmResult) {
+    return { explanation: llmResult };
+  }
+
+  return { explanation: generateHeuristicExplanation(input.code, input.languageId) };
+}
+
+export function performHeuristicRefactor({
+  code,
+  languageId,
+  style,
+  includeDocumentation
+}: RefactorInput): RefactorOutput {
   let working = normalizeLineEndings(code);
   const notes: string[] = [];
 
   if (includeDocumentation) {
-    const docAdded = maybePrependDocblock(working, style);
+    const docAdded = maybePrependInlineBanner(working, style);
     if (docAdded.changed) {
       working = docAdded.code;
-      notes.push('Added documentation banner to reflect automated refactor.');
+      notes.push('Added inline banner comment to reflect automated refactor.');
     }
   }
 
@@ -81,13 +110,13 @@ function normalizeWhitespace(text: string): { code: string } {
   return { code: untabbed.trimEnd() + '\n' };
 }
 
-function maybePrependDocblock(code: string, style: RefactorStyle): { changed: boolean; code: string } {
-  if (code.trimStart().startsWith('/**')) {
+function maybePrependInlineBanner(code: string, style: RefactorStyle): { changed: boolean; code: string } {
+  if (code.trimStart().startsWith('//')) {
     return { changed: false, code };
   }
 
-  const banner = ['/**', ` * Auto-refactored (${style})`, ' */'];
-  return { changed: true, code: `${banner.join('\n')}\n${code}` };
+  const banner = `// Auto-refactored (${style})`;
+  return { changed: true, code: `${banner}\n${code}` };
 }
 
 function modernizeJavaScript(code: string, style: RefactorStyle): {
@@ -156,4 +185,54 @@ function polishJava(code: string, style: RefactorStyle): {
 function tightenSpacing(code: string): string | undefined {
   const condensed = code.replace(/\n{3,}/g, '\n\n');
   return condensed === code ? undefined : condensed;
+}
+
+function generateHeuristicExplanation(code: string, languageId?: string): string {
+  const lines = code.split(/\r?\n/);
+  const nonEmpty = lines.filter((line) => line.trim().length > 0);
+  const metrics = {
+    totalLines: lines.length,
+    meaningfulLines: nonEmpty.length,
+    functionCount: countMatches(code, /(function\s+\w+\s*\()|=>|def\s+\w+/g),
+    classCount: countMatches(code, /class\s+\w+/g),
+    branchCount: countMatches(code, /\b(if|else if|switch|case)\b/g),
+    loopCount: countMatches(code, /\b(for|while|do\s+while|foreach)\b/g),
+    commentLines: countMatches(code, /(^|\s)(\/\/|#)/g)
+  };
+
+  const highlights: string[] = [];
+  if (metrics.functionCount > 0) {
+    highlights.push(`Defines ${metrics.functionCount} function${metrics.functionCount > 1 ? 's' : ''}.`);
+  }
+  if (metrics.classCount > 0) {
+    highlights.push(`Contains ${metrics.classCount} class${metrics.classCount > 1 ? 'es' : ''}.`);
+  }
+  if (metrics.branchCount > 0 || metrics.loopCount > 0) {
+    highlights.push(
+      `Control flow: ${metrics.branchCount} branch${metrics.branchCount === 1 ? '' : 'es'} and ${metrics.loopCount} loop${metrics.loopCount === 1 ? '' : 's'}.`
+    );
+  }
+  if (metrics.commentLines > 0) {
+    highlights.push(`Includes ${metrics.commentLines} inline comment${metrics.commentLines === 1 ? '' : 's'}.`);
+  }
+  if (languageId) {
+    highlights.push(`Language hint: ${languageId}.`);
+  }
+
+  if (highlights.length === 0) {
+    highlights.push('Primarily consists of literal or configuration data.');
+  }
+
+  return [
+    'Selection Insight:',
+    `• Lines (total/meaningful): ${metrics.totalLines}/${metrics.meaningfulLines}`,
+    `• Functions: ${metrics.functionCount} | Classes: ${metrics.classCount}`,
+    `• Branches: ${metrics.branchCount} | Loops: ${metrics.loopCount}`,
+    ...highlights.map((note) => `• ${note}`)
+  ].join('\n');
+}
+
+function countMatches(text: string, pattern: RegExp): number {
+  const matches = text.match(pattern);
+  return matches ? matches.length : 0;
 }

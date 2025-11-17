@@ -20,6 +20,36 @@
         "shortTitle": "AI Refactor"
       },
       {
+        "command": "genRefactorer.explainSelection",
+        "title": "GenRefactorer: Explain Selection",
+        "shortTitle": "Explain Selection"
+      },
+      {
+        "command": "genRefactorer.showSelectionActions",
+        "title": "GenRefactorer: Selection Actions",
+        "shortTitle": "Selection Actions"
+      },
+      {
+        "command": "genRefactorer.assistant.refreshContext",
+        "title": "GenRefactorer: Refresh Assistant Context",
+        "category": "GenRefactorer"
+      },
+      {
+        "command": "genRefactorer.assistant.sendContextToMcp",
+        "title": "GenRefactorer: Send Context Snapshot to MCP",
+        "category": "GenRefactorer"
+      },
+      {
+        "command": "genRefactorer.assistant.runMcpAction",
+        "title": "GenRefactorer: Run MCP Action",
+        "category": "GenRefactorer"
+      },
+      {
+        "command": "genRefactorer.assistant.chatWithMcp",
+        "title": "GenRefactorer: Chat with MCP",
+        "category": "GenRefactorer"
+      },
+      {
         "command": "genRefactorer.explainRefactor",
         "title": "GenRefactorer: Explain Refactor"
       },
@@ -28,6 +58,44 @@
         "title": "GenRefactorer: Open Settings"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "genRefactorer.refactorSelection",
+          "group": "navigation@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "genRefactorer.explainSelection",
+          "group": "navigation@1",
+          "when": "editorHasSelection"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "genRefactorer.showSelectionActions",
+          "group": "navigation@3",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "genRefactorerAssistant",
+          "title": "GenRefactorer",
+          "icon": "resources/assistant.svg"
+        }
+      ]
+    },
+    "views": {
+      "genRefactorerAssistant": [
+        {
+          "id": "genRefactorer.assistantPanel",
+          "name": "Assistant"
+        }
+      ]
+    },
     "configuration": {
       "type": "object",
       "title": "GenRefactorer",
@@ -57,6 +125,45 @@
           "type": "boolean",
           "default": true,
           "description": "Add inline documentation comments to the refactored output when supported."
+        },
+        "genRefactorer.autoRefactorOnSelection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically prepare AI suggestions for the active document after edits."
+        },
+        "genRefactorer.autoRefactorDebounceMs": {
+          "type": "number",
+          "default": 1500,
+          "minimum": 100,
+          "description": "Delay (in milliseconds) after typing stops before auto suggestions run."
+        },
+        "genRefactorer.maxAutoRefactorCharacters": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 50,
+          "description": "Maximum document size (in characters) that the background auto refactor will attempt."
+        },
+        "genRefactorer.showSelectionActions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically show a quick action menu (refactor vs explain) whenever you highlight code."
+        },
+        "genRefactorer.assistant.enableMcpBridge": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the experimental MCP bridge connection used for Gemini-powered workflows.",
+          "scope": "application"
+        },
+        "genRefactorer.assistant.mcpEndpoint": {
+          "type": "string",
+          "default": "",
+          "description": "URL of the local MCP server GenRefactorer should connect to when the bridge is enabled."
+        },
+        "genRefactorer.assistant.mcpAuthToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional authentication token passed to the MCP server when establishing the bridge.",
+          "scope": "machine"
         }
       }
     }
@@ -70,16 +177,20 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.6",
     "@types/node": "^18.19.0",
     "@types/vscode": "^1.85.0",
-  "@types/glob": "^8.1.0",
-  "@types/mocha": "^10.0.6",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
+    "@vscode/test-electron": "^2.3.8",
     "eslint": "^8.57.0",
-  "glob": "^10.3.10",
+    "glob": "^10.3.10",
     "mocha": "^10.2.0",
-    "typescript": "^5.3.3",
-    "@vscode/test-electron": "^2.3.8"
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   }
 }

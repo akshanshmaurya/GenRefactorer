@@ -5,19 +5,28 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "build": "tsc -p .",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "mcp:mock": "tsx watch src/mcpMockServer.ts",
+    "mcp:mock:start": "tsx src/mcpMockServer.ts",
+    "mcp:gemini": "tsx watch src/mcpGeminiServer.ts",
+    "mcp:gemini:start": "tsx src/mcpGeminiServer.ts"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.5.0",
     "cors": "^2.8.5",
-    "express": "^4.19.2"
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.53.2",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^18.19.40",
     "ts-node-dev": "^2.0.0",
+    "tsx": "^4.19.1",
     "typescript": "^5.3.3"
   }
 }

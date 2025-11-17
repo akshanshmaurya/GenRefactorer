@@ -1,6 +1,7 @@
+import 'dotenv/config';
 import cors from 'cors';
 import express, { Request, Response } from 'express';
-import { performRefactor, RefactorStyle } from './refactorEngine.js';
+import { performRefactor, performExplain, RefactorStyle } from './refactorEngine.js';
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 5050);
@@ -12,9 +13,9 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({ status: 'ok', service: 'GenRefactorer-backend', timestamp: new Date().toISOString() });
 });
 
-app.post('/refactor', (req: Request, res: Response) => {
+app.post('/refactor', async (req: Request, res: Response) => {
   try {
-    const { code, languageId, style = 'balanced', includeDocumentation = true } = req.body ?? {};
+    const { code, languageId, style = 'balanced', includeDocumentation = true, mode = 'refactor' } = req.body ?? {};
 
     if (typeof code !== 'string' || code.trim().length === 0) {
       res.status(400).json({ error: 'Request body must include non-empty "code" string.' });
@@ -26,9 +27,25 @@ app.post('/refactor', (req: Request, res: Response) => {
       return;
     }
 
-    const output = performRefactor({
+    const normalizedLanguage = typeof languageId === 'string' ? languageId : undefined;
+
+    if (mode === 'explain') {
+      const explanation = await performExplain({
+        code,
+        languageId: normalizedLanguage,
+        style,
+        includeDocumentation: Boolean(includeDocumentation)
+      });
+
+      res.json({
+        explanation: explanation.explanation
+      });
+      return;
+    }
+
+    const output = await performRefactor({
       code,
-      languageId: typeof languageId === 'string' ? languageId : undefined,
+      languageId: normalizedLanguage,
       style,
       includeDocumentation: Boolean(includeDocumentation)
     });
