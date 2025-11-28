@@ -146,8 +146,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const refactored = refactorResult.code;
 
         if (refactorResult.explanation) {
-          outputChannel?.appendLine(refactorResult.explanation);
-          assistantBus?.log(refactorResult.explanation);
+          assistantBus?.publishChatMessage({
+            id: `refactor-explanation-${Date.now()}`,
+            role: 'assistant',
+            message: refactorResult.explanation,
+            timestamp: new Date().toISOString()
+          });
+          assistantBus?.log('Refactor explanation added to chat.');
         }
         const action = await vscode.window.showInformationMessage(
           'GenRefactorer generated a refactor suggestion.',
@@ -212,11 +217,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       try {
         assistantBus?.publishStatus('processing', 'Explaining selection...');
         const explanation = await service.explainSelection(text, options);
-        outputChannel?.show(true);
-        outputChannel?.appendLine(explanation);
-        assistantBus?.log('Selection explanation ready.');
+        assistantBus?.publishChatMessage({
+          id: `explain-${Date.now()}`,
+          role: 'assistant',
+          message: explanation,
+          timestamp: new Date().toISOString()
+        });
+        assistantBus?.log('Selection explanation added to chat.');
         assistantBus?.publishStatus('idle', 'Selection explanation complete.');
-        void vscode.window.showInformationMessage('GenRefactorer explanation added to output.');
+        void vscode.window.showInformationMessage('GenRefactorer explanation added to chat.');
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         void vscode.window.showErrorMessage(`GenRefactorer failed to explain selection: ${message}`);
@@ -442,9 +451,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       try {
         assistantBus?.publishStatus('processing', 'Scanning for vulnerabilities...');
         const result = await service.scanForVulnerabilities(text, options);
-        outputChannel?.show(true);
-        outputChannel?.appendLine('--- Security Scan Results ---');
-        outputChannel?.appendLine(result);
+        assistantBus?.publishChatMessage({
+          id: `security-scan-${Date.now()}`,
+          role: 'assistant',
+          message: `**Security Scan Results**\n\n${result}`,
+          timestamp: new Date().toISOString()
+        });
         assistantBus?.log('Security scan complete.');
         assistantBus?.publishStatus('idle', 'Security scan complete.');
       } catch (error) {
