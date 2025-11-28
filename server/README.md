@@ -1,6 +1,10 @@
 # GenRefactorer Backend
 
-Local HTTP service that powers the GenRefactorer VS Code extension. It exposes a `/refactor` endpoint compatible with the extension's request/response contract.
+Local HTTP service that powers the GenRefactorer VS Code extension.
+
+> **Note**: As of version 0.0.2, the GenRefactorer extension supports **direct integration with the Google Gemini API**. This server is now **optional** and primarily used for the experimental MCP bridge or if you prefer a self-hosted proxy.
+
+It exposes a `/refactor` endpoint compatible with the extension's request/response contract.
 
 ## Setup
 

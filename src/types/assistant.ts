@@ -20,6 +20,13 @@ export interface AssistantLogEntry {
   timestamp: string;
 }
 
+export interface AssistantChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  message: string;
+  timestamp: string;
+}
+
 export interface StatusUpdate {
   status: AssistantStatus;
   lastMessage?: string;
@@ -67,6 +74,7 @@ export interface AssistantEventMap {
   actions: ActionsUpdate;
   bridge: BridgeStateUpdate;
   bridgeMessage: BridgeMessageUpdate;
+  chat: AssistantChatMessage;
 }
 
 export interface McpRemoteActionDescriptor {

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.2] - 2025-11-28
+
+- **Direct Gemini Integration**: The extension now communicates directly with the Google Gemini API, removing the need for a separate backend server for core features.
+- **Security Vulnerability Detection**: Added `scanForVulnerabilities` to `RefactorService` and a new command `GenRefactorer: Scan for Security Vulnerabilities`.
+- **Smart Git Commits**: Added `GitService` and `GenRefactorer: Smart Commit Changes` command to generate commit messages and commit changes directly.
+- **Configuration Update**: Added `genRefactorer.model` (defaulting to `gemini-2.5-flash`) and improved API key resolution (supports `.env` in workspace root).
+
 ## [Unreleased]
 
 - Introduce a background auto-refactor controller that continuously prepares inline suggestions with side-by-side previews.

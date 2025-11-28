@@ -1,11 +1,16 @@
 import * as vscode from 'vscode';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+import * as fs from 'fs';
 
 export interface RefactorOptions {
   style: 'conservative' | 'balanced' | 'aggressive';
   includeDocumentation: boolean;
-  apiEndpoint: string;
+  apiEndpoint: string; // Kept for backward compat, but we primarily use apiKey now
   apiKey: string;
   languageId?: string;
+  model?: string;
 }
 
 export interface RefactorResult {
@@ -14,56 +19,69 @@ export interface RefactorResult {
 }
 
 export class RefactorService {
-  private static readonly REMOTE_TIMEOUT_MS = 45000;
+  private static readonly DEFAULT_MODEL = 'gemini-2.5-flash';
 
-  public constructor(private readonly output: vscode.OutputChannel) {}
+  public constructor(private readonly output: vscode.OutputChannel) { }
 
   public async refactorCode(input: string, options: RefactorOptions): Promise<RefactorResult> {
     if (!input.trim()) {
       throw new Error('Cannot refactor empty selection.');
     }
 
-    this.output.appendLine(`[GenRefactorer] Preparing refactor request (style: ${options.style})`);
-    const prefersRemote = this.isRemoteConfigured(options);
-
-    if (prefersRemote) {
-      try {
-        const start = Date.now();
-        const remoteResult = await this.requestRemoteRefactor(input, options);
-        const duration = Date.now() - start;
-        this.output.appendLine(`[GenRefactorer] Remote refactor completed in ${duration}ms.`);
-        return remoteResult;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.output.appendLine(`[GenRefactorer] Remote refactor failed: ${message}. Falling back to local heuristics.`);
-      }
-    } else {
-      this.output.appendLine('[GenRefactorer] Remote endpoint not configured. Using local heuristic refactor.');
+    const apiKey = await this.resolveApiKey(options.apiKey);
+    if (!apiKey) {
+      this.output.appendLine('[GenRefactorer] No API Key found. Please configure genRefactorer.apiKey or add a .env file.');
+      return this.localHeuristicRefactor(input, options, 'Gemini API key not found.');
     }
 
-    const fallback = this.localHeuristicRefactor(input, options);
-    this.output.appendLine('[GenRefactorer] Local heuristic refactor complete.');
-    return fallback;
+    this.output.appendLine(`[GenRefactorer] Refactoring with Gemini (${options.model || RefactorService.DEFAULT_MODEL})...`);
+
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: options.model || RefactorService.DEFAULT_MODEL });
+
+      const prompt = `
+You are an expert coding assistant specializing in refactoring.
+Refactor the following code.
+Style: ${options.style} (conservative: minimal changes, balanced: clean up, aggressive: modern idioms and performance).
+Include Documentation: ${options.includeDocumentation}.
+Language: ${options.languageId || 'auto-detect'}.
+
+Output ONLY the refactored code. Do not include markdown backticks or conversational text unless requested.
+If you want to provide an explanation, put it in a separate block at the end starting with "---EXPLANATION---".
+
+CODE:
+${input}
+      `.trim();
+
+      const result = await model.generateContent(prompt);
+      const response = result.response;
+      const text = response.text();
+
+      const [codePart, explanationPart] = text.split('---EXPLANATION---');
+
+      // Clean up markdown code blocks if present
+      const cleanCode = this.stripMarkdown(codePart.trim());
+
+      return {
+        code: cleanCode,
+        explanation: explanationPart ? explanationPart.trim() : undefined
+      };
+
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[GenRefactorer] Gemini request failed: ${message}. Falling back to local heuristics.`);
+      return this.localHeuristicRefactor(input, options, `Gemini request failed: ${message}`);
+    }
   }
 
   public async explainRefactor(input: string, refactored: string, existingExplanation?: string): Promise<string> {
     if (existingExplanation && existingExplanation.trim().length > 0) {
       return existingExplanation;
     }
-
-    const { addedLines, removedLines } = this.diffSummary(input, refactored);
-    const explanation = [
-      '• Reduced redundant constructs and tightened control flow.',
-      '• Improved naming and normalized modern syntax usage.',
-      '• Added inline documentation for critical logic paths where applicable.'
-    ];
-
-    return [
-      'Refactor Summary:',
-      `Lines removed: ${removedLines}`,
-      `Lines added: ${addedLines}`,
-      ...explanation
-    ].join('\n');
+    // If we didn't get an explanation from the refactor step, we could ask for one here,
+    // but for now let's just return a simple summary to save tokens/latency.
+    return 'Refactoring completed successfully. Review the changes in the diff view.';
   }
 
   public async explainSelection(input: string, options: RefactorOptions): Promise<string> {
@@ -71,135 +89,118 @@ export class RefactorService {
       throw new Error('Cannot explain an empty selection.');
     }
 
-    this.output.appendLine('[GenRefactorer] Preparing selection explanation.');
-    const prefersRemote = this.isRemoteConfigured(options);
-
-    if (prefersRemote) {
-      try {
-        const explanation = await this.requestRemoteExplanation(input, options);
-        return explanation;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.output.appendLine(`[GenRefactorer] Remote explanation failed: ${message}. Using heuristic summary.`);
-      }
+    const apiKey = await this.resolveApiKey(options.apiKey);
+    if (!apiKey) {
+      return this.localSelectionExplanation(input, options.languageId);
     }
 
-    return this.localSelectionExplanation(input, options.languageId);
-  }
-
-  private async requestRemoteRefactor(text: string, options: RefactorOptions): Promise<RefactorResult> {
-    if (!options.apiEndpoint) {
-      throw new Error('Missing API endpoint. Set "genRefactorer.apiEndpoint" in settings.');
-    }
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    };
-
-    if (options.apiKey) {
-      headers.Authorization = `Bearer ${options.apiKey}`;
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), RefactorService.REMOTE_TIMEOUT_MS);
+    this.output.appendLine('[GenRefactorer] Explaining selection with Gemini...');
 
     try {
-      const response = await fetch(options.apiEndpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          code: text,
-          languageId: options.languageId,
-          style: options.style,
-          includeDocumentation: options.includeDocumentation
-        }),
-        signal: controller.signal
-      });
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: options.model || RefactorService.DEFAULT_MODEL });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Backend responded with ${response.status}: ${response.statusText} ${errorText}`.trim());
-      }
+      const prompt = `
+Explain the following code snippet concisely.
+Language: ${options.languageId || 'auto-detect'}.
 
-      const payload = (await response.json()) as Partial<{
-        refactoredCode: string;
-        code: string;
-        result: string;
-        explanation: string;
-      }>;
+CODE:
+${input}
+      `.trim();
 
-      const code = payload.refactoredCode ?? payload.code ?? payload.result;
-      if (!code) {
-        throw new Error('Backend response missing refactored code.');
-      }
+      const result = await model.generateContent(prompt);
+      return result.response.text().trim();
 
-      return {
-        code,
-        explanation: payload.explanation
-      };
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request to refactoring service timed out.');
-      }
-
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[GenRefactorer] Gemini explanation failed: ${message}.`);
+      return this.localSelectionExplanation(input, options.languageId);
     }
   }
 
-  private async requestRemoteExplanation(text: string, options: RefactorOptions): Promise<string> {
-    if (!options.apiEndpoint) {
-      throw new Error('Missing API endpoint. Set "genRefactorer.apiEndpoint" in settings.');
+  public async scanForVulnerabilities(input: string, options: RefactorOptions): Promise<string> {
+    if (!input.trim()) {
+      throw new Error('Cannot scan empty selection.');
     }
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    };
-
-    if (options.apiKey) {
-      headers.Authorization = `Bearer ${options.apiKey}`;
+    const apiKey = await this.resolveApiKey(options.apiKey);
+    if (!apiKey) {
+      throw new Error('Gemini API Key is required for security scanning.');
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), RefactorService.REMOTE_TIMEOUT_MS);
+    this.output.appendLine('[GenRefactorer] Scanning for vulnerabilities with Gemini...');
 
     try {
-      const response = await fetch(options.apiEndpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          code: text,
-          languageId: options.languageId,
-          style: options.style,
-          mode: 'explain'
-        }),
-        signal: controller.signal
-      });
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: options.model || RefactorService.DEFAULT_MODEL });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Backend responded with ${response.status}: ${response.statusText} ${errorText}`.trim());
-      }
+      const prompt = `
+Analyze the following code for security vulnerabilities (e.g., SQL Injection, XSS, Command Injection, Insecure Deserialization, etc.).
+Language: ${options.languageId || 'auto-detect'}.
 
-      const payload = (await response.json()) as Partial<{ explanation: string }>;
-      if (!payload.explanation) {
-        throw new Error('Backend response missing explanation text.');
-      }
+Output Format:
+- List each vulnerability found with Severity (High/Medium/Low).
+- Explanation of why it is a vulnerability.
+- A FIXED version of the code that resolves the issues.
 
-      return payload.explanation;
+If no vulnerabilities are found, state "No obvious security vulnerabilities found."
+
+CODE:
+${input}
+      `.trim();
+
+      const result = await model.generateContent(prompt);
+      return result.response.text().trim();
+
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new Error('Request to explanation service timed out.');
-      }
-
+      const message = error instanceof Error ? error.message : String(error);
+      this.output.appendLine(`[GenRefactorer] Security scan failed: ${message}.`);
       throw error;
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
-  private localHeuristicRefactor(text: string, options: RefactorOptions): RefactorResult {
+  private async resolveApiKey(configKey: string): Promise<string | undefined> {
+    if (configKey && configKey.trim().length > 0) {
+      return configKey;
+    }
+
+    // Try to find .env in workspace folders
+    if (vscode.workspace.workspaceFolders) {
+      for (const folder of vscode.workspace.workspaceFolders) {
+        const envPath = path.join(folder.uri.fsPath, '.env');
+        if (fs.existsSync(envPath)) {
+          const envConfig = dotenv.parse(fs.readFileSync(envPath));
+          if (envConfig.GEMINI_API_KEY) {
+            this.output.appendLine('[GenRefactorer] Found GEMINI_API_KEY in workspace .env file.');
+            return envConfig.GEMINI_API_KEY;
+          }
+        }
+        // Also check server/.env as a fallback since the user mentioned it
+        const serverEnvPath = path.join(folder.uri.fsPath, 'server', '.env');
+        if (fs.existsSync(serverEnvPath)) {
+          const envConfig = dotenv.parse(fs.readFileSync(serverEnvPath));
+          if (envConfig.GEMINI_API_KEY) {
+            this.output.appendLine('[GenRefactorer] Found GEMINI_API_KEY in server/.env file.');
+            return envConfig.GEMINI_API_KEY;
+          }
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private stripMarkdown(text: string): string {
+    // Remove wrapping ```language ... ```
+    const codeBlockRegex = /^```(?:\w+)?\s*([\s\S]*?)\s*```$/;
+    const match = text.match(codeBlockRegex);
+    if (match) {
+      return match[1];
+    }
+    return text;
+  }
+
+  private localHeuristicRefactor(text: string, options: RefactorOptions, reason: string): RefactorResult {
     const normalizedLines = text.split(/\r?\n/).map((line) => line.replace(/\s+$/g, ''));
     const transformed = normalizedLines.map((line) =>
       line
@@ -216,70 +217,11 @@ export class RefactorService {
 
     return {
       code: documented,
-      explanation: 'Local heuristic refactor applied (remote service unavailable).'
+      explanation: `Local heuristic refactor applied. Reason: ${reason}`
     };
   }
 
   private localSelectionExplanation(text: string, languageId?: string): string {
-    const lines = text.split(/\r?\n/);
-    const nonEmpty = lines.filter((line) => line.trim().length > 0);
-    const metrics = {
-      totalLines: lines.length,
-      meaningfulLines: nonEmpty.length,
-      functionCount: this.matchCount(text, /(function\s+\w+\s*\()|=>|def\s+\w+/g),
-      classCount: this.matchCount(text, /class\s+\w+/g),
-      branchCount: this.matchCount(text, /\b(if|else if|switch|case)\b/g),
-      loopCount: this.matchCount(text, /\b(for|while|do\s+while|foreach)\b/g),
-      commentLines: this.matchCount(text, /(^|\s)(\/\/|#)/g)
-    };
-
-    const highlights: string[] = [];
-    if (metrics.functionCount > 0) {
-      highlights.push(`Defines ${metrics.functionCount} function${metrics.functionCount > 1 ? 's' : ''}.`);
-    }
-    if (metrics.classCount > 0) {
-      highlights.push(`Contains ${metrics.classCount} class${metrics.classCount > 1 ? 'es' : ''}.`);
-    }
-    if (metrics.branchCount > 0 || metrics.loopCount > 0) {
-      highlights.push(
-        `Control flow: ${metrics.branchCount} branch${metrics.branchCount === 1 ? '' : 'es'} and ${metrics.loopCount} loop${metrics.loopCount === 1 ? '' : 's'}.`
-      );
-    }
-    if (metrics.commentLines > 0) {
-      highlights.push(`Includes ${metrics.commentLines} inline comment${metrics.commentLines === 1 ? '' : 's'}.`);
-    }
-    if (languageId) {
-      highlights.push(`Language hint: ${languageId}.`);
-    }
-
-    if (highlights.length === 0) {
-      highlights.push('Primarily consists of literal or configuration values.');
-    }
-
-    return [
-      'Selection Insight:',
-      `• Lines (total/meaningful): ${metrics.totalLines}/${metrics.meaningfulLines}`,
-      `• Functions: ${metrics.functionCount} | Classes: ${metrics.classCount}`,
-      `• Branches: ${metrics.branchCount} | Loops: ${metrics.loopCount}`,
-      ...highlights.map((note) => `• ${note}`)
-    ].join('\n');
-  }
-
-  private matchCount(text: string, pattern: RegExp): number {
-    const matches = text.match(pattern);
-    return matches ? matches.length : 0;
-  }
-
-  private diffSummary(original: string, updated: string): { addedLines: number; removedLines: number } {
-    const originalLines = original.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    const updatedLines = updated.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    return {
-      addedLines: Math.max(updatedLines.length - originalLines.length, 0),
-      removedLines: Math.max(originalLines.length - updatedLines.length, 0)
-    };
-  }
-
-  private isRemoteConfigured(options: RefactorOptions): boolean {
-    return Boolean(options.apiEndpoint && options.apiEndpoint.startsWith('http'));
+    return `Gemini API not configured. Local summary: ${text.split('\n').length} lines of ${languageId || 'code'}.`;
   }
 }

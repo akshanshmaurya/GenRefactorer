@@ -4,7 +4,7 @@
   "description": "Generative AI assistant that refactors legacy code into clean, modern, and documented form inside VS Code.",
   "version": "0.0.1",
   "license": "SEE LICENSE IN LICENSE",
-  "publisher": "your-name-here",
+  "publisher": "Aksahnsh and Yashraj",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,6 +12,9 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "*"
+  ],
   "contributes": {
     "commands": [
       {
@@ -50,12 +53,32 @@
         "category": "GenRefactorer"
       },
       {
+        "command": "genRefactorer.assistant.chatPrompt",
+        "title": "GenRefactorer: Send Prompt to Assistant",
+        "category": "GenRefactorer"
+      },
+      {
+        "command": "genRefactorer.assistant.fixDiagnostics",
+        "title": "GenRefactorer: Fix Diagnostics",
+        "category": "GenRefactorer"
+      },
+      {
         "command": "genRefactorer.explainRefactor",
         "title": "GenRefactorer: Explain Refactor"
       },
       {
         "command": "genRefactorer.openSettings",
         "title": "GenRefactorer: Open Settings"
+      },
+      {
+        "command": "genRefactorer.scanSecurity",
+        "title": "GenRefactorer: Scan for Security Vulnerabilities",
+        "category": "GenRefactorer"
+      },
+      {
+        "command": "genRefactorer.commitChanges",
+        "title": "GenRefactorer: Smart Commit Changes",
+        "category": "GenRefactorer"
       }
     ],
     "menus": {
@@ -68,6 +91,11 @@
         {
           "command": "genRefactorer.explainSelection",
           "group": "navigation@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "genRefactorer.scanSecurity",
+          "group": "navigation@2",
           "when": "editorHasSelection"
         }
       ],
@@ -92,7 +120,8 @@
       "genRefactorerAssistant": [
         {
           "id": "genRefactorer.assistantPanel",
-          "name": "Assistant"
+          "name": "Assistant",
+          "type": "webview"
         }
       ]
     },
@@ -108,8 +137,13 @@
         "genRefactorer.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key used to authenticate with the refactoring backend.",
+          "description": "API key used to authenticate with Gemini. If empty, the extension looks for a .env file in the workspace.",
           "scope": "machine"
+        },
+        "genRefactorer.model": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "The Gemini model to use for refactoring (e.g., gemini-2.5-flash, gemini-1.5-pro)."
         },
         "genRefactorer.refactorStyle": {
           "type": "string",
@@ -128,7 +162,7 @@
         },
         "genRefactorer.autoRefactorOnSelection": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Automatically prepare AI suggestions for the active document after edits."
         },
         "genRefactorer.autoRefactorDebounceMs": {
@@ -191,6 +225,8 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "dotenv": "^17.2.3",
     "ws": "^8.18.3"
   }
 }

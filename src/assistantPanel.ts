@@ -1,7 +1,13 @@
 import * as vscode from 'vscode';
 import { AssistantEventBus } from './assistantEventBus';
 import { WorkspaceContextSnapshot } from './workspaceContextManager';
-import { AssistantAction, AssistantLogEntry, AssistantStatus, BridgeStateUpdate } from './types/assistant';
+import {
+  AssistantAction,
+  AssistantChatMessage,
+  AssistantLogEntry,
+  AssistantStatus,
+  BridgeStateUpdate
+} from './types/assistant';
 
 interface AssistantPanelState {
   status: AssistantStatus;
@@ -17,6 +23,7 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
   private readonly logEntries: AssistantLogEntry[] = [];
   private readonly disposables: vscode.Disposable[] = [];
   private bridgeState: BridgeStateUpdate = { state: 'disconnected', message: 'MCP bridge not connected.' };
+  private readonly chatMessages: AssistantChatMessage[] = [];
 
   public constructor(private readonly _context: vscode.ExtensionContext, private readonly bus: AssistantEventBus) {
     this.disposables.push(
@@ -38,6 +45,10 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
       this.bus.onBridgeStateChanged((payload) => {
         this.bridgeState = payload;
         this.postMessage({ type: 'assistant.bridge', payload });
+      }),
+      this.bus.onChatMessage((payload) => {
+        this.chatMessages.push(payload);
+        this.postMessage({ type: 'assistant.chat', payload });
       })
     );
   }
@@ -54,8 +65,21 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
     webviewView.webview.html = this.renderHtml();
 
     webviewView.webview.onDidReceiveMessage((message) => {
-      if (message && message.type === 'assistant.command') {
+      if (!message) {
+        return;
+      }
+      if (message.type === 'assistant.command') {
         void vscode.commands.executeCommand(message.command, ...(message.args ?? []));
+      } else if (message.type === 'assistant.chatPrompt') {
+        const text: unknown = message.payload?.message;
+        const includeContext: unknown = message.payload?.includeContext;
+        if (typeof text === 'string') {
+          void vscode.commands.executeCommand(
+            'genRefactorer.assistant.chatPrompt',
+            text,
+            includeContext === undefined ? true : Boolean(includeContext)
+          );
+        }
       }
     });
 
@@ -64,10 +88,7 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
     }
 
     this.postMessage({ type: 'assistant.status', payload: this.state });
-
-    if (this.actions.length) {
-      this.postMessage({ type: 'assistant.actions', payload: this.actions });
-    }
+    this.postMessage({ type: 'assistant.actions', payload: this.actions });
 
     if (this.logEntries.length) {
       this.logEntries.forEach((entry) => this.postMessage({ type: 'assistant.log', payload: entry }));
@@ -76,6 +97,8 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
     if (this.bridgeState) {
       this.postMessage({ type: 'assistant.bridge', payload: this.bridgeState });
     }
+
+    this.postMessage({ type: 'assistant.chat.replace', payload: this.chatMessages });
   }
 
   private postMessage(message: unknown): void {
@@ -107,6 +130,10 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
           <style>
             :root {
               color-scheme: light dark;
+              --tab-border: var(--vscode-panel-border);
+              --tab-active-foreground: var(--vscode-panelTitle-activeForeground);
+              --tab-inactive-foreground: var(--vscode-panelTitle-inactiveForeground);
+              --tab-active-border: var(--vscode-panelTitle-activeBorder);
             }
             body {
               margin: 0;
@@ -115,370 +142,531 @@ export class AssistantPanelProvider implements vscode.WebviewViewProvider, vscod
               font-size: 13px;
               color: var(--vscode-foreground);
               background: var(--vscode-sideBar-background);
+              display: flex;
+              flex-direction: column;
+              height: 100vh;
+              overflow: hidden;
             }
-            .panel-header {
-              padding: 12px 16px;
+            
+            /* Header & Tabs */
+            .header-container {
+              flex-shrink: 0;
+              background: var(--vscode-sideBar-background);
               border-bottom: 1px solid var(--vscode-panel-border);
             }
-            h1 {
-              margin: 0;
-              font-size: 14px;
+            .panel-header {
+              padding: 8px 16px;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
             }
-            h2 {
-              margin: 0 0 4px;
-              font-size: 13px;
+            h1 { margin: 0; font-size: 13px; font-weight: 600; }
+            .status-badges { display: flex; gap: 8px; font-size: 11px; }
+            .status-badge { 
+              padding: 2px 6px; 
+              border-radius: 3px; 
+              background: var(--vscode-badge-background); 
+              color: var(--vscode-badge-foreground);
             }
-            .status {
+            .status-badge[data-state="error"] { background: var(--vscode-editorError-foreground); color: white; }
+            .status-badge[data-state="ready"] { background: var(--vscode-testing-iconPassed); color: white; }
+
+            .tabs {
+              display: flex;
+              padding: 0 8px;
+              gap: 16px;
+            }
+            .tab {
+              padding: 8px 4px;
+              cursor: pointer;
+              color: var(--tab-inactive-foreground);
+              border-bottom: 2px solid transparent;
               font-size: 12px;
-              color: var(--vscode-descriptionForeground);
+              font-weight: 500;
+              text-transform: uppercase;
             }
-            .bridge-state {
-              font-size: 11px;
-              color: var(--vscode-descriptionForeground);
+            .tab:hover { color: var(--tab-active-foreground); }
+            .tab.active {
+              color: var(--tab-active-foreground);
+              border-bottom-color: var(--tab-active-border);
             }
-            .bridge-state[data-state="ready"] {
-              color: var(--vscode-testing-iconPassed);
+
+            /* Main Content Area */
+            .tab-content {
+              flex: 1;
+              overflow: hidden;
+              display: none;
+              flex-direction: column;
             }
-            .bridge-state[data-state="error"] {
-              color: var(--vscode-editorError-foreground);
+            .tab-content.active { display: flex; }
+
+            /* Chat Tab */
+            .chat-container {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
             }
-            .actions {
-              padding: 12px 16px;
+            .suggestion-chips {
               display: flex;
               gap: 8px;
-              flex-wrap: wrap;
+              padding: 12px 16px;
+              overflow-x: auto;
+              white-space: nowrap;
+              border-bottom: 1px solid var(--vscode-panel-border);
+              flex-shrink: 0;
             }
-            button {
-              padding: 6px 12px;
-              border: 1px solid var(--vscode-button-border, transparent);
-              border-radius: 4px;
+            .chip {
+              padding: 4px 10px;
+              border-radius: 12px;
               background: var(--vscode-button-secondaryBackground);
               color: var(--vscode-button-secondaryForeground);
+              font-size: 11px;
               cursor: pointer;
+              border: 1px solid transparent;
+              user-select: none;
             }
-            button.primary {
+            .chip:hover {
+              background: var(--vscode-button-secondaryHoverBackground);
+            }
+            .chip.primary {
               background: var(--vscode-button-background);
               color: var(--vscode-button-foreground);
             }
-            button:disabled {
-              opacity: 0.5;
-              cursor: not-allowed;
+            .chip.primary:hover {
+              background: var(--vscode-button-hoverBackground);
             }
-            ul {
-              list-style: none;
-              padding: 0 16px 16px;
-              margin: 0;
-            }
-            li {
-              margin-bottom: 8px;
-            }
-            .log {
-              font-family: var(--vscode-editor-font-family);
-              font-size: 12px;
-              background: var(--vscode-textBlockQuote-background);
-              padding: 12px 16px;
-              margin: 0 16px 16px;
-              border-radius: 4px;
-              max-height: 160px;
+
+            .chat-history {
+              flex: 1;
               overflow-y: auto;
-            }
-            section.context,
-            section.diagnostics {
-              border-top: 1px solid var(--vscode-panel-border);
-              padding: 12px 16px;
-            }
-            section.context header,
-            section.diagnostics header {
-              padding: 0;
-              border: none;
-              margin-bottom: 8px;
-            }
-            .context-block {
-              display: grid;
-              gap: 4px;
-            }
-            .preview {
-              margin-top: 8px;
-            }
-            pre {
-              font-family: var(--vscode-editor-font-family);
-              font-size: 12px;
-              background: var(--vscode-editor-background);
-              padding: 8px;
-              border-radius: 4px;
-              max-height: 180px;
-              overflow: auto;
-            }
-            .diagnostics li {
-              font-size: 12px;
-            }
-            .status[data-state="processing"] {
-              color: var(--vscode-progressBar-background);
-            }
-            .status[data-state="error"] {
-              color: var(--vscode-editorError-foreground);
-            }
-            .actions[data-actions] {
-              border-top: 1px solid var(--vscode-panel-border);
-              border-bottom: 1px solid var(--vscode-panel-border);
-            }
-            .actions .empty-actions {
-              color: var(--vscode-descriptionForeground);
-              font-size: 12px;
-            }
-            .log-entries {
-              padding: 0 16px 16px;
-              margin: 0;
-              list-style: none;
-            }
-            .log-entry {
+              padding: 16px;
               display: flex;
               flex-direction: column;
-              gap: 2px;
-              border-left: 3px solid transparent;
-              padding: 6px 8px;
-              margin-bottom: 6px;
-              background: var(--vscode-textBlockQuote-background);
-              border-radius: 4px;
+              gap: 16px;
             }
-            .log-entry .meta {
-              font-size: 10px;
+            .chat-message {
+              display: flex;
+              flex-direction: column;
+              gap: 4px;
+              max-width: 90%;
+            }
+            .chat-message.user { align-self: flex-end; align-items: flex-end; }
+            .chat-message.assistant { align-self: flex-start; align-items: flex-start; }
+            
+            .message-bubble {
+              padding: 8px 12px;
+              border-radius: 8px;
+              font-size: 13px;
+              line-height: 1.4;
+              word-wrap: break-word;
+            }
+            .chat-message.user .message-bubble {
+              background: var(--vscode-button-background);
+              color: var(--vscode-button-foreground);
+              border-bottom-right-radius: 2px;
+            }
+            .chat-message.assistant .message-bubble {
+              background: var(--vscode-editor-inactiveSelectionBackground);
+              color: var(--vscode-editor-foreground);
+              border-bottom-left-radius: 2px;
+            }
+            .message-meta { font-size: 10px; opacity: 0.7; margin: 0 4px; }
+
+            /* Markdown Styles */
+            .markdown strong { font-weight: 600; }
+            .markdown em { font-style: italic; }
+            .markdown code {
+              font-family: var(--vscode-editor-font-family);
+              background: rgba(127, 127, 127, 0.2);
+              padding: 2px 4px;
+              border-radius: 3px;
+              font-size: 12px;
+            }
+            .markdown pre {
+              background: var(--vscode-textBlockQuote-background);
+              padding: 8px;
+              border-radius: 4px;
+              overflow-x: auto;
+              margin: 4px 0;
+            }
+            .markdown pre code {
+              background: none;
+              padding: 0;
+            }
+            .markdown ul { padding-left: 20px; margin: 4px 0; }
+            .markdown li { margin-bottom: 4px; }
+
+            /* Input Area */
+            .input-area {
+              padding: 12px;
+              border-top: 1px solid var(--vscode-panel-border);
+              background: var(--vscode-sideBar-background);
+            }
+            .input-box {
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              background: var(--vscode-input-background);
+              border: 1px solid var(--vscode-input-border);
+              border-radius: 6px;
+              padding: 8px;
+            }
+            .input-box:focus-within {
+              border-color: var(--vscode-focusBorder);
+            }
+            textarea {
+              width: 100%;
+              border: none;
+              background: transparent;
+              color: var(--vscode-input-foreground);
+              font-family: var(--vscode-font-family);
+              resize: none;
+              outline: none;
+              min-height: 20px;
+              max-height: 100px;
+            }
+            .input-footer {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+            }
+            .context-toggle {
+              display: flex;
+              align-items: center;
+              gap: 4px;
+              font-size: 11px;
+              color: var(--vscode-descriptionForeground);
+              cursor: pointer;
+            }
+            .send-btn {
+              padding: 4px 12px;
+              background: var(--vscode-button-background);
+              color: var(--vscode-button-foreground);
+              border: none;
+              border-radius: 4px;
+              cursor: pointer;
+              font-size: 11px;
+              font-weight: 600;
+            }
+            .send-btn:hover { background: var(--vscode-button-hoverBackground); }
+
+            /* Activity & Context Tabs */
+            .list-container {
+              padding: 0;
+              margin: 0;
+              list-style: none;
+              overflow-y: auto;
+              flex: 1;
+            }
+            .list-item {
+              padding: 8px 16px;
+              border-bottom: 1px solid var(--vscode-panel-border);
+              font-size: 12px;
+            }
+            .list-item-header {
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 4px;
+              font-weight: 600;
               color: var(--vscode-descriptionForeground);
             }
-            .log-entry.level-info {
-              border-color: var(--vscode-button-secondaryBackground);
-            }
-            .log-entry.level-warn {
-              border-color: var(--vscode-editorWarning-foreground);
-            }
-            .log-entry.level-error {
-              border-color: var(--vscode-editorError-foreground);
+            .context-section { padding: 16px; }
+            .context-row { margin-bottom: 8px; font-size: 12px; }
+            .context-label { font-weight: 600; color: var(--vscode-descriptionForeground); }
+            .preview-box {
+              margin-top: 8px;
+              background: var(--vscode-textBlockQuote-background);
+              padding: 8px;
+              border-radius: 4px;
+              font-family: var(--vscode-editor-font-family);
+              font-size: 11px;
+              overflow-x: auto;
             }
           </style>
         </head>
         <body>
-          <header class="panel-header">
-            <h1>GenRefactorer Assistant</h1>
-            <div class="status" data-state="${status}">Status: <span data-status>${status}</span></div>
-            <div class="bridge-state" data-bridge-state data-state="${this.bridgeState.state}">
-              Bridge: <span data-bridge-label>${this.bridgeState.state}</span>
+          <div class="header-container">
+            <div class="panel-header">
+              <h1>GenRefactorer</h1>
+              <div class="status-badges">
+                <div class="status-badge" data-status>${status}</div>
+                <div class="status-badge" data-bridge-state>${this.bridgeState.state}</div>
+              </div>
             </div>
-          </header>
-          <section class="actions" data-actions>
-            <div class="empty-actions">No quick actions available.</div>
-          </section>
-          <section>
-            <ul class="log-entries" data-log></ul>
-          </section>
-          <section class="log" data-last-message>Awaiting assistant activity...</section>
-          <section class="context">
-            <header>
-              <h2>Workspace Context</h2>
-              <div class="timestamp" data-context-timestamp>Snapshot pending...</div>
-            </header>
-            <div class="context-block">
-              <div><strong>File:</strong> <span data-active-file>-</span></div>
-              <div><strong>Language:</strong> <span data-language>-</span></div>
-              <div><strong>Selection:</strong> <span data-selection>-</span></div>
+            <div class="tabs">
+              <div class="tab active" data-tab="chat">Chat</div>
+              <div class="tab" data-tab="activity">Activity</div>
+              <div class="tab" data-tab="context">Context</div>
             </div>
-            <div class="preview">
-              <strong>Preview</strong>
-              <pre data-preview>Open a file to see its preview.</pre>
+          </div>
+
+          <!-- Chat Tab -->
+          <div class="tab-content active" id="chat">
+            <div class="suggestion-chips" data-chips>
+              <!-- Chips injected by JS -->
             </div>
-          </section>
-          <section class="diagnostics">
-            <header>
-              <h2>Diagnostics</h2>
-              <div data-diagnostics-summary>No diagnostics captured.</div>
-            </header>
-            <ul data-diagnostics></ul>
-          </section>
+            <div class="chat-container">
+              <div class="chat-history" data-chat-log>
+                <div class="chat-empty" style="text-align: center; color: var(--vscode-descriptionForeground); margin-top: 40px;">
+                  Start a conversation or use a quick action above.
+                </div>
+              </div>
+              <div class="input-area">
+                <div class="input-box">
+                  <textarea data-chat-input rows="1" placeholder="Ask GenRefactorer..."></textarea>
+                  <div class="input-footer">
+                    <label class="context-toggle">
+                      <input type="checkbox" data-chat-context checked /> Include Context
+                    </label>
+                    <button class="send-btn" data-send-btn>Send</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Activity Tab -->
+          <div class="tab-content" id="activity">
+            <ul class="list-container" data-log></ul>
+          </div>
+
+          <!-- Context Tab -->
+          <div class="tab-content" id="context">
+            <div class="context-section">
+              <div class="context-row"><span class="context-label">File:</span> <span data-active-file>-</span></div>
+              <div class="context-row"><span class="context-label">Language:</span> <span data-language>-</span></div>
+              <div class="context-row"><span class="context-label">Selection:</span> <span data-selection>-</span></div>
+              <div class="context-row">
+                <span class="context-label">Diagnostics:</span>
+                <ul data-issues style="margin: 4px 0 0 0; padding-left: 16px;"></ul>
+              </div>
+              <div class="context-row">
+                <span class="context-label">Preview:</span>
+                <div class="preview-box" data-preview>No preview available</div>
+              </div>
+            </div>
+          </div>
+
           <script nonce="${nonce}">
             const vscode = acquireVsCodeApi();
-            const statusEl = document.querySelector('[data-status]');
-            const statusContainer = document.querySelector('.status');
-            const bridgeStateEl = document.querySelector('[data-bridge-state]');
-            const bridgeLabelEl = document.querySelector('[data-bridge-label]');
+            
+            // Elements
+            const tabs = document.querySelectorAll('.tab');
+            const tabContents = document.querySelectorAll('.tab-content');
+            const chipsContainer = document.querySelector('[data-chips]');
+            const chatLog = document.querySelector('[data-chat-log]');
+            const chatInput = document.querySelector('[data-chat-input]');
+            const sendBtn = document.querySelector('[data-send-btn]');
+            const contextToggle = document.querySelector('[data-chat-context]');
             const logList = document.querySelector('[data-log]');
-            const lastMessageEl = document.querySelector('[data-last-message]');
+            
+            // Context Elements
             const activeFileEl = document.querySelector('[data-active-file]');
             const languageEl = document.querySelector('[data-language]');
             const selectionEl = document.querySelector('[data-selection]');
+            const issuesListEl = document.querySelector('[data-issues]');
             const previewEl = document.querySelector('[data-preview]');
-            const diagnosticsSummaryEl = document.querySelector('[data-diagnostics-summary]');
-            const diagnosticsListEl = document.querySelector('[data-diagnostics]');
-            const contextTimestampEl = document.querySelector('[data-context-timestamp]');
-            const actionsContainer = document.querySelector('[data-actions]');
-            let currentActions = [];
+            const statusBadge = document.querySelector('[data-status]');
+            const bridgeBadge = document.querySelector('[data-bridge-state]');
 
-            window.addEventListener('message', (event) => {
-              const message = event.data;
-              if (message?.type === 'assistant.status') {
-                statusEl.textContent = message.payload.status;
-                statusContainer?.setAttribute('data-state', message.payload.status);
-                if (message.payload.lastMessage) {
-                  lastMessageEl.textContent = message.payload.lastMessage;
+            // State
+            let chatHistory = [];
+            
+            // Tab Switching
+            tabs.forEach(tab => {
+              tab.addEventListener('click', () => {
+                tabs.forEach(t => t.classList.remove('active'));
+                tabContents.forEach(c => c.classList.remove('active'));
+                
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.tab).classList.add('active');
+              });
+            });
+
+            // Auto-resize textarea
+            chatInput.addEventListener('input', function() {
+              this.style.height = 'auto';
+              this.style.height = (this.scrollHeight) + 'px';
+            });
+
+            // Send Message
+            function sendMessage() {
+              const text = chatInput.value.trim();
+              if (!text) return;
+              
+              vscode.postMessage({
+                type: 'assistant.chatPrompt',
+                payload: {
+                  message: text,
+                  includeContext: contextToggle.checked
                 }
-              } else if (message?.type === 'assistant.log') {
-                appendLogEntry(message.payload);
-              } else if (message?.type === 'assistant.context') {
-                renderContext(message.payload);
-              } else if (message?.type === 'assistant.actions') {
-                currentActions = Array.isArray(message.payload) ? message.payload : [];
-                renderActions(currentActions);
-              } else if (message?.type === 'assistant.bridge') {
-                renderBridgeState(message.payload);
+              });
+              
+              chatInput.value = '';
+              chatInput.style.height = 'auto';
+            }
+
+            sendBtn.addEventListener('click', sendMessage);
+            chatInput.addEventListener('keydown', (e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
               }
             });
 
-            function renderActions(actions) {
-              if (!actionsContainer) {
-                return;
+            // Quick Actions (Chips)
+            const defaultActions = [
+              { label: 'Refactor', command: 'genRefactorer.refactorSelection', primary: true },
+              { label: 'Explain', command: 'genRefactorer.explainSelection' },
+              { label: 'Fix Bugs', command: 'genRefactorer.assistant.fixDiagnostics' },
+              { label: 'Scan Security', command: 'genRefactorer.scanSecurity' },
+              { label: 'Commit', command: 'genRefactorer.commitChanges' }
+            ];
+
+            function renderChips(actions) {
+              chipsContainer.innerHTML = '';
+              // Merge default actions with remote actions if needed, or just use defaults for now
+              // For this UI, we'll stick to the core set + any dynamic ones
+              
+              const allActions = [...defaultActions];
+              if (actions && actions.length) {
+                actions.forEach(a => {
+                  if (!allActions.find(da => da.command === a.command)) {
+                    allActions.push(a);
+                  }
+                });
               }
 
-              actionsContainer.innerHTML = '';
-              if (!actions || !actions.length) {
-                const empty = document.createElement('div');
-                empty.className = 'empty-actions';
-                empty.textContent = 'No quick actions available.';
-                actionsContainer.appendChild(empty);
-                return;
-              }
-
-              actions.forEach((action) => {
-                const button = document.createElement('button');
-                button.textContent = action.label;
-                if (action.emphasis === 'primary') {
-                  button.classList.add('primary');
-                }
-                button.setAttribute('data-command', action.command);
-                if (action.args) {
-                  button.setAttribute('data-args', JSON.stringify(action.args));
-                }
-                if (action.description) {
-                  button.title = action.description;
-                }
-                if (action.disabled) {
-                  button.disabled = true;
-                }
-                button.addEventListener('click', () => {
-                  const args = button.getAttribute('data-args');
+              allActions.forEach(action => {
+                const chip = document.createElement('div');
+                chip.className = 'chip' + (action.primary ? ' primary' : '');
+                chip.textContent = action.label;
+                chip.addEventListener('click', () => {
                   vscode.postMessage({
                     type: 'assistant.command',
-                    command: button.getAttribute('data-command'),
-                    args: args ? JSON.parse(args) : []
+                    command: action.command,
+                    args: action.args || []
                   });
                 });
-                actionsContainer.appendChild(button);
+                chipsContainer.appendChild(chip);
               });
             }
 
-            function renderBridgeState(update) {
-              if (!update || !bridgeStateEl || !bridgeLabelEl) {
-                return;
-              }
-              bridgeStateEl.setAttribute('data-state', update.state);
-              bridgeLabelEl.textContent = update.state + (update.message ? ' - ' + update.message : '');
-              if (update.message) {
-                bridgeStateEl.title = update.message;
-              }
+            // Markdown Parser (Lightweight)
+            function parseMarkdown(text) {
+              if (!text) return '';
+              let html = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+              
+              // Code blocks
+              html = html.replace(/\\\`\\\`\\\`([\\s\\S]*?)\\\`\\\`\\\`/g, '<pre><code>$1</code></pre>');
+              
+              // Inline code
+              html = html.replace(/\\\`([^\\\`]+)\\\`/g, '<code>$1</code>');
+              
+              // Bold
+              html = html.replace(/\\*\\*([^\\*]+)\\*\\*/g, '<strong>$1</strong>');
+              
+              // Italic
+              html = html.replace(/\\*([^\\*]+)\\*/g, '<em>$1</em>');
+              
+              // Lists
+              html = html.replace(/^\\s*-\\s+(.*)$/gm, '<ul><li>$1</li></ul>');
+              html = html.replace(/<\\/ul>\\s*<ul>/g, ''); // Merge adjacent lists
+              
+              return html;
             }
 
-            function appendLogEntry(entry) {
-              if (!entry || !logList) {
+            // Chat Rendering
+            function renderChat(messages) {
+              chatLog.innerHTML = '';
+              if (!messages.length) {
+                chatLog.innerHTML = '<div class="chat-empty" style="text-align: center; color: var(--vscode-descriptionForeground); margin-top: 40px;">Start a conversation or use a quick action above.</div>';
                 return;
               }
 
-              const item = document.createElement('li');
-              const timestamp = new Date(entry.timestamp).toLocaleTimeString();
-              item.className = 'log-entry level-' + (entry.level || 'info');
-
-              const meta = document.createElement('div');
-              meta.className = 'meta';
-              meta.textContent = '[' + timestamp + '] ' + entry.level.toUpperCase();
-              const message = document.createElement('div');
-              message.textContent = entry.message;
-
-              item.appendChild(meta);
-              item.appendChild(message);
-              logList.prepend(item);
-              lastMessageEl.textContent = entry.message;
-
-              while (logList.childElementCount > 50) {
-                logList.removeChild(logList.lastElementChild);
-              }
+              messages.forEach(msg => {
+                const div = document.createElement('div');
+                div.className = 'chat-message ' + (msg.role || 'assistant');
+                
+                const meta = document.createElement('div');
+                meta.className = 'message-meta';
+                meta.textContent = msg.role === 'user' ? 'You' : 'GenRefactorer';
+                
+                const bubble = document.createElement('div');
+                bubble.className = 'message-bubble markdown';
+                bubble.innerHTML = parseMarkdown(msg.message);
+                
+                div.appendChild(meta);
+                div.appendChild(bubble);
+                chatLog.appendChild(div);
+              });
+              
+              chatLog.scrollTop = chatLog.scrollHeight;
             }
 
-            function renderContext(snapshot) {
-              if (!snapshot) {
-                return;
+            // Message Handling
+            window.addEventListener('message', event => {
+              const msg = event.data;
+              switch (msg.type) {
+                case 'assistant.status':
+                  statusBadge.textContent = msg.payload.status;
+                  statusBadge.setAttribute('data-state', msg.payload.status === 'error' ? 'error' : 'idle');
+                  break;
+                case 'assistant.bridge':
+                  bridgeBadge.textContent = msg.payload.state;
+                  bridgeBadge.setAttribute('data-state', msg.payload.state);
+                  break;
+                case 'assistant.actions':
+                  renderChips(msg.payload);
+                  break;
+                case 'assistant.chat':
+                  chatHistory.push(msg.payload);
+                  renderChat(chatHistory);
+                  break;
+                case 'assistant.chat.replace':
+                  chatHistory = msg.payload || [];
+                  renderChat(chatHistory);
+                  break;
+                case 'assistant.log':
+                  const li = document.createElement('li');
+                  li.className = 'list-item';
+                  li.innerHTML = '<div class="list-item-header"><span>' + msg.payload.level.toUpperCase() + '</span><span>' + new Date(msg.payload.timestamp).toLocaleTimeString() + '</span></div><div>' + msg.payload.message + '</div>';
+                  logList.prepend(li);
+                  break;
+                case 'assistant.context':
+                  updateContext(msg.payload);
+                  break;
               }
+            });
 
-              contextTimestampEl.textContent = new Date(snapshot.timestamp).toLocaleString();
-
+            function updateContext(snapshot) {
+              if (!snapshot) return;
               if (snapshot.activeEditor) {
                 activeFileEl.textContent = snapshot.activeEditor.fileName;
                 languageEl.textContent = snapshot.activeEditor.languageId;
-                selectionEl.textContent = formatSelection(snapshot.activeEditor.selection);
-                previewEl.textContent = snapshot.activeEditor.preview || 'File preview unavailable.';
+                selectionEl.textContent = 'Ln ' + (snapshot.activeEditor.selection.start.line + 1);
+                previewEl.textContent = snapshot.activeEditor.preview || 'No preview';
+              }
+              
+              issuesListEl.innerHTML = '';
+              if (snapshot.diagnostics && snapshot.diagnostics.length) {
+                snapshot.diagnostics.forEach(d => {
+                  const li = document.createElement('li');
+                  li.textContent = d.message;
+                  li.style.marginBottom = '4px';
+                  issuesListEl.appendChild(li);
+                });
               } else {
-                activeFileEl.textContent = 'No active file';
-                languageEl.textContent = '-';
-                selectionEl.textContent = '-';
-                previewEl.textContent = 'Open a file to capture its context.';
+                issuesListEl.innerHTML = '<li>No issues detected.</li>';
               }
-
-              const diagnostics = snapshot.diagnostics || [];
-              diagnosticsSummaryEl.textContent = diagnostics.length
-                ? diagnostics.length + ' diagnostic' + (diagnostics.length === 1 ? '' : 's') + ' captured'
-                : 'No diagnostics captured.';
-
-              diagnosticsListEl.innerHTML = '';
-              if (!diagnostics.length) {
-                const emptyState = document.createElement('li');
-                emptyState.textContent = 'Workspace is clean.';
-                diagnosticsListEl.appendChild(emptyState);
-                return;
-              }
-
-              diagnostics.slice(0, 20).forEach((diagnostic) => {
-                const item = document.createElement('li');
-                const startLine = diagnostic.range.start.line + 1;
-                const startChar = diagnostic.range.start.character + 1;
-                item.innerHTML =
-                  '<strong>' +
-                  diagnostic.severity.toUpperCase() +
-                  '</strong> - ' +
-                  diagnostic.fileName +
-                  ' [' +
-                  startLine +
-                  ':' +
-                  startChar +
-                  '] - ' +
-                  diagnostic.message;
-                diagnosticsListEl.appendChild(item);
-              });
             }
-
-            function formatSelection(selection) {
-              if (!selection) {
-                return 'No selection.';
-              }
-              const startLine = selection.start.line + 1;
-              const endLine = selection.end.line + 1;
-              if (startLine === endLine) {
-                return (
-                  'Line ' +
-                  startLine +
-                  ' (' +
-                  (selection.start.character + 1) +
-                  ' -> ' +
-                  (selection.end.character + 1) +
-                  ')'
-                );
-              }
-              return 'Lines ' + startLine + '-' + endLine;
-            }
+            
+            // Initial Render
+            renderChips([]);
           </script>
         </body>
       </html>

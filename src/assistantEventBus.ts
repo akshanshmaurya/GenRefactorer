@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import {
   ActionsUpdate,
+  AssistantChatMessage,
   AssistantLogEntry,
   AssistantStatus,
   BridgeMessageUpdate,
@@ -18,6 +19,7 @@ export class AssistantEventBus implements vscode.Disposable {
   private readonly actionsEmitter = new vscode.EventEmitter<ActionsUpdate>();
   private readonly bridgeEmitter = new vscode.EventEmitter<BridgeStateUpdate>();
   private readonly bridgeMessageEmitter = new vscode.EventEmitter<BridgeMessageUpdate>();
+  private readonly chatEmitter = new vscode.EventEmitter<AssistantChatMessage>();
   private _disposed = false;
   private logSequence = 0;
 
@@ -27,6 +29,7 @@ export class AssistantEventBus implements vscode.Disposable {
   public readonly onActionsChanged = this.actionsEmitter.event;
   public readonly onBridgeStateChanged = this.bridgeEmitter.event;
   public readonly onBridgeMessage = this.bridgeMessageEmitter.event;
+  public readonly onChatMessage = this.chatEmitter.event;
 
   public dispose(): void {
     if (this._disposed) {
@@ -38,6 +41,7 @@ export class AssistantEventBus implements vscode.Disposable {
     this.actionsEmitter.dispose();
     this.bridgeEmitter.dispose();
     this.bridgeMessageEmitter.dispose();
+    this.chatEmitter.dispose();
     this._disposed = true;
   }
 
@@ -75,5 +79,9 @@ export class AssistantEventBus implements vscode.Disposable {
 
   public publishBridgeMessage(update: BridgeMessageUpdate): void {
     this.bridgeMessageEmitter.fire(update);
+  }
+
+  public publishChatMessage(message: AssistantChatMessage): void {
+    this.chatEmitter.fire(message);
   }
 }

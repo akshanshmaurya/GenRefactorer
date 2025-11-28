@@ -4,7 +4,9 @@ import { RefactorService, RefactorOptions } from './refactorService';
 import { GenRefactorerPreviewProvider, GENREFACTORER_PREVIEW_SCHEME } from './previewProvider';
 import { SelectionActionController } from './selectionActionController';
 import { AssistantPanelProvider } from './assistantPanel';
-import { WorkspaceContextManager } from './workspaceContextManager';
+import { WorkspaceContextManager, DiagnosticsEntry } from './workspaceContextManager';
+import { GitService } from './gitService';
+import * as path from 'path';
 import { AssistantEventBus } from './assistantEventBus';
 import { ActionOrchestrator } from './actionOrchestrator';
 import { AssistantAction } from './types/assistant';
@@ -28,11 +30,13 @@ let assistantBus: AssistantEventBus | undefined;
 let orchestrator: ActionOrchestrator | undefined;
 let mcpBridge: McpBridge | undefined;
 let mcpCoordinator: McpCoordinator | undefined;
+let gitService: GitService | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('GenRefactorer');
   outputChannel = output;
   const service = new RefactorService(output);
+  gitService = new GitService(output);
 
   context.subscriptions.push(output);
 
@@ -43,17 +47,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   context.subscriptions.push(previewRegistration);
 
-  const config = vscode.workspace.getConfiguration('genRefactorer');
-  const debounce = config.get<number>('autoRefactorDebounceMs', 1500);
-  autoController = new AutoRefactorController(
-    service,
-    previewProvider,
-    output,
-    resolveOptions,
-    undefined,
-    debounce
-  );
-  context.subscriptions.push(autoController);
+  const configureAutoRefactorController = (): void => {
+    const config = vscode.workspace.getConfiguration('genRefactorer');
+    const enabled = config.get<boolean>('autoRefactorOnSelection', false);
+    if (!enabled) {
+      if (autoController) {
+        autoController.dispose();
+        autoController = undefined;
+      }
+      return;
+    }
+
+    if (autoController) {
+      autoController.dispose();
+      autoController = undefined;
+    }
+
+    const debounce = config.get<number>('autoRefactorDebounceMs', 1500);
+    autoController = new AutoRefactorController(
+      service,
+      previewProvider,
+      output,
+      resolveOptions,
+      undefined,
+      debounce
+    );
+    context.subscriptions.push(autoController);
+  };
+
+  configureAutoRefactorController();
 
   selectionController = new SelectionActionController();
   context.subscriptions.push(selectionController);
@@ -78,6 +100,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('genRefactorer.assistant')) {
         applyMcpConfiguration();
+      }
+      if (
+        event.affectsConfiguration('genRefactorer.autoRefactorOnSelection') ||
+        event.affectsConfiguration('genRefactorer.autoRefactorDebounceMs')
+      ) {
+        configureAutoRefactorController();
       }
     })
   );
@@ -270,6 +298,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand(
+      'genRefactorer.assistant.chatPrompt',
+      async (rawMessage?: unknown, includeContext?: unknown) => {
+        const provided = typeof rawMessage === 'string' ? rawMessage.trim() : '';
+        const resolvedMessage =
+          provided.length > 0
+            ? provided
+            : await vscode.window.showInputBox({
+              prompt: 'Ask the GenRefactorer assistant for help',
+              placeHolder: 'Describe the task you want the assistant to run'
+            });
+
+        if (!resolvedMessage || resolvedMessage.trim().length === 0) {
+          return;
+        }
+
+        const shouldIncludeContext = typeof includeContext === 'boolean' ? includeContext : true;
+        if (mcpCoordinator) {
+          mcpCoordinator.sendChatMessage(resolvedMessage, shouldIncludeContext);
+          return;
+        }
+
+        const timestamp = new Date().toISOString();
+        assistantBus?.publishChatMessage({
+          id: `chat-${timestamp}-user`,
+          role: 'user',
+          message: resolvedMessage,
+          timestamp
+        });
+        assistantBus?.publishChatMessage({
+          id: `chat-${timestamp}-system`,
+          role: 'system',
+          message: 'Connect the MCP bridge in settings to chat with the assistant.',
+          timestamp: new Date().toISOString()
+        });
+        assistantBus?.publishStatus('error', 'Assistant bridge is disabled.');
+        assistantBus?.log('Chat prompt ignored because MCP bridge is disabled.', 'warn');
+        void vscode.window.showWarningMessage(
+          'GenRefactorer is not connected to the MCP bridge. Enable it in settings to chat with the assistant.'
+        );
+      }
+    )
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('genRefactorer.explainRefactor', async () => {
       if (!snapshot) {
         void vscode.window.showInformationMessage('Run a refactor before requesting an explanation.');
@@ -290,6 +363,142 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('genRefactorer.openSettings', async () => {
       await vscode.commands.executeCommand('workbench.action.openSettings', 'GenRefactorer');
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('genRefactorer.assistant.fixDiagnostics', async () => {
+      if (!contextManager) {
+        void vscode.window.showWarningMessage('Workspace context manager is not ready yet.');
+        return;
+      }
+
+      const snapshot = contextManager.getSnapshot();
+      if (!snapshot.diagnostics.length) {
+        void vscode.window.showInformationMessage('No diagnostics found in the current workspace.');
+        return;
+      }
+
+      type DiagnosticPick = vscode.QuickPickItem & { diagnostic: DiagnosticsEntry };
+
+      const picks: DiagnosticPick[] = snapshot.diagnostics.slice(0, 50).map((diagnostic) => ({
+        label: diagnostic.fileName,
+        description: diagnostic.message,
+        detail: `${diagnostic.severity.toUpperCase()} [${diagnostic.range.start.line + 1}:${diagnostic.range.start.character + 1
+          }]`,
+        diagnostic
+      }));
+
+      const selection = await vscode.window.showQuickPick(picks, {
+        placeHolder: 'Select a diagnostic to navigate to and attempt a fix'
+      });
+
+      if (!selection) {
+        return;
+      }
+
+      const diagnostic = selection.diagnostic;
+      const uri = vscode.Uri.parse(diagnostic.uri);
+      try {
+        const document = await vscode.workspace.openTextDocument(uri);
+        const editor = await vscode.window.showTextDocument(document, { preview: false });
+        const range = new vscode.Range(
+          new vscode.Position(diagnostic.range.start.line, diagnostic.range.start.character),
+          new vscode.Position(diagnostic.range.end.line, diagnostic.range.end.character)
+        );
+        editor.selection = new vscode.Selection(range.start, range.end);
+        editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
+        assistantBus?.publishStatus('processing', 'Opened diagnostic for review.');
+        assistantBus?.log(`Navigated to diagnostic in ${diagnostic.fileName}.`);
+        await vscode.commands.executeCommand('editor.action.quickFix');
+        assistantBus?.publishStatus('idle', 'Diagnostic highlighted. Apply a quick fix to resolve.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        assistantBus?.publishStatus('error', message);
+        assistantBus?.log(`Failed to open diagnostic target: ${message}`, 'error');
+        void vscode.window.showErrorMessage(`Unable to open diagnostic target: ${message}`);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('genRefactorer.scanSecurity', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showInformationMessage('Open a file to scan for vulnerabilities.');
+        return;
+      }
+
+      const selection = editor.selection;
+      if (selection.isEmpty) {
+        void vscode.window.showWarningMessage('Select the code you want to scan.');
+        return;
+      }
+
+      const text = editor.document.getText(selection);
+      const options = resolveOptions(editor.document.languageId);
+      assistantBus?.log('Security scan requested.');
+
+      try {
+        assistantBus?.publishStatus('processing', 'Scanning for vulnerabilities...');
+        const result = await service.scanForVulnerabilities(text, options);
+        outputChannel?.show(true);
+        outputChannel?.appendLine('--- Security Scan Results ---');
+        outputChannel?.appendLine(result);
+        assistantBus?.log('Security scan complete.');
+        assistantBus?.publishStatus('idle', 'Security scan complete.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void vscode.window.showErrorMessage(`Security scan failed: ${message}`);
+        assistantBus?.publishStatus('error', message);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('genRefactorer.commitChanges', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        void vscode.window.showInformationMessage('Open a file to commit changes.');
+        return;
+      }
+
+      if (editor.document.isDirty) {
+        await editor.document.save();
+      }
+
+      const cwd = path.dirname(editor.document.uri.fsPath);
+      if (!gitService || !(await gitService.isGitRepo(cwd))) {
+        void vscode.window.showErrorMessage('Current file is not in a git repository.');
+        return;
+      }
+
+      const fileName = path.basename(editor.document.uri.fsPath);
+
+      try {
+        assistantBus?.publishStatus('processing', 'Generating commit message...');
+
+        const options = resolveOptions(editor.document.languageId);
+
+        const commitMessage = await vscode.window.showInputBox({
+          prompt: 'Enter commit message',
+          placeHolder: `Refactor ${fileName}`,
+          value: `Refactor ${fileName}: Improved code quality`
+        });
+
+        if (!commitMessage) return;
+
+        await gitService.stageFile(editor.document.uri.fsPath);
+        await gitService.commit(commitMessage, cwd);
+
+        void vscode.window.showInformationMessage(`Committed changes to ${fileName}`);
+        assistantBus?.log(`Committed ${fileName}: ${commitMessage}`);
+        assistantBus?.publishStatus('idle', 'Commit complete.');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void vscode.window.showErrorMessage(`Commit failed: ${message}`);
+        assistantBus?.publishStatus('error', message);
+      }
     })
   );
 }
@@ -322,7 +531,8 @@ function resolveOptions(languageId: string): RefactorOptions {
     apiKey: config.get<string>('apiKey', ''),
     includeDocumentation: config.get<boolean>('includeDocumentation', true),
     style: config.get<'conservative' | 'balanced' | 'aggressive'>('refactorStyle', 'balanced'),
-    languageId
+    languageId,
+    model: config.get<string>('model', 'gemini-2.5-flash')
   };
 }
 

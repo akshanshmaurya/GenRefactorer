@@ -89,6 +89,13 @@ export class McpCoordinator implements vscode.Disposable {
       context: includeContext ? this.contextManager.getSnapshot() : undefined
     };
 
+    this.bus.publishChatMessage({
+      id: `chat-${Date.now()}`,
+      role: 'user',
+      message: trimmed,
+      timestamp: new Date().toISOString()
+    });
+
     const sent = this.bridge.send({ type: 'assistant/chatMessage', payload });
     if (sent) {
       this.bus.publishStatus('processing', 'Waiting for Gemini response...');
@@ -254,6 +261,12 @@ export class McpCoordinator implements vscode.Disposable {
     }
     const prefix = payload.role === 'assistant' ? 'Gemini' : 'MCP';
     this.bus.log(`${prefix}: ${payload.message}`);
+    this.bus.publishChatMessage({
+      id: `chat-${Date.now()}`,
+      role: payload.role ?? 'assistant',
+      message: payload.message,
+      timestamp: new Date().toISOString()
+    });
     this.bus.publishStatus('idle', 'Gemini conversation updated.');
   }
 
